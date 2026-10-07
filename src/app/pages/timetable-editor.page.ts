@@ -25,12 +25,15 @@ import {
   addNotice,
   batchShift,
   clearBatchSelection,
+  discardDraft,
   importNetwork,
   moveTrain,
+  publishDraft,
   resetViewport,
   restorePersistedState,
   selectTrain,
   setPrintSection,
+  shiftBaseline,
   updateFilter,
   updateTrainStop,
   updateViewport,
@@ -40,9 +43,14 @@ import {
   selectConflictSummary,
   selectConflicts,
   selectFilter,
+  selectHasDraft,
+  selectLastPublishedAt,
   selectNetwork,
   selectNotices,
+  selectPreviewNetwork,
   selectPrintSectionId,
+  selectPublishError,
+  selectPublishedConflicts,
   selectSelectedTrainId,
   selectSelectedConflicts,
   selectSelectedTrain,
@@ -176,6 +184,48 @@ import { normalizeImportedNetwork } from '../utils/timetable-utils';
             <strong>{{ vm.summary.overtake }}</strong>
           </div>
           <div class="summary-bar__spacer"></div>
+          <div class="draft-control" [class.draft-control--dirty]="vm.hasDraft">
+            <i class="pi" [class.pi-pencil]="vm.hasDraft" [class.pi-check-circle]="!vm.hasDraft"></i>
+            <span *ngIf="vm.hasDraft">预演中有未发布调整</span>
+            <span *ngIf="!vm.hasDraft">预演与现行调度一致</span>
+            <p-button
+              icon="pi pi-send"
+              label="发布"
+              size="small"
+              [disabled]="!vm.hasDraft"
+              (onClick)="publish()"
+            ></p-button>
+            <p-button
+              icon="pi pi-undo"
+              label="放弃"
+              size="small"
+              severity="secondary"
+              [text]="true"
+              [disabled]="!vm.hasDraft"
+              (onClick)="discardDraftAction()"
+            ></p-button>
+          </div>
+          <div class="baseline-control">
+            <span>基准时刻</span>
+            <p-inputNumber
+              [(ngModel)]="baselineMinutes"
+              [showButtons]="true"
+              [min]="-120"
+              [max]="120"
+              [step]="5"
+              suffix=" 分"
+              size="small"
+              ariaLabel="基准时刻平移分钟"
+            ></p-inputNumber>
+            <p-button
+              icon="pi pi-fast-forward"
+              label="整体平移"
+              size="small"
+              severity="secondary"
+              pTooltip="对全图所有列车生效，并使未发布预演批次失效"
+              (onClick)="shiftBaselineAction()"
+            ></p-button>
+          </div>
           <div class="batch-control">
             <span>批量平移</span>
             <p-inputNumber
@@ -221,6 +271,11 @@ import { normalizeImportedNetwork } from '../utils/timetable-utils';
           </div>
         </div>
 
+        <div class="publish-error" *ngIf="vm.publishError">
+          <i class="pi pi-exclamation-triangle"></i>
+          <span>{{ vm.publishError }}</span>
+        </div>
+
         <div class="workspace">
           <aside class="workspace__left panel">
             <app-train-inspector
@@ -244,9 +299,9 @@ import { normalizeImportedNetwork } from '../utils/timetable-utils';
               </div>
             </div>
             <app-graph-canvas
-              [network]="vm.network"
-              [trains]="vm.visibleTrains"
-              [conflicts]="vm.conflicts"
+              [network]="vm.canvasNetwork"
+              [trains]="vm.canvasTrains"
+              [conflicts]="vm.canvasConflicts"
               [viewport]="vm.viewport"
               [selectedTrainId]="vm.selectedTrainId"
               [batchSelection]="vm.batchSelection"
@@ -260,6 +315,9 @@ import { normalizeImportedNetwork } from '../utils/timetable-utils';
               <span>视图缩放 {{ (vm.viewport.scaleX * 100).toFixed(0) }}%</span>
               <span>Alt + 点击可加入批量选择</span>
               <span *ngIf="vm.batchSelection.length">批量选中 {{ vm.batchSelection.length }} 趟</span>
+              <span class="footer-draft" *ngIf="vm.hasDraft">
+                <i class="pi pi-pencil"></i> 预演调整未发布 · 发布后全图重算并生效
+              </span>
             </footer>
           </section>
 
@@ -330,12 +388,15 @@ export class TimetableEditorPageComponent implements OnInit {
   selectedCategories: string[] = [];
   direction: 'up' | 'down' | 'all' = 'all';
   batchMinutes = 5;
+  baselineMinutes = 10;
   printSectionId: string | null = null;
   importDialog = false;
 
   readonly viewModel$ = combineLatest({
     network: this.store.select(selectNetwork),
+    previewNetwork: this.store.select(selectPreviewNetwork),
     visibleTrains: this.store.select(selectVisibleTrains),
+    publishedConflicts: this.store.select(selectPublishedConflicts),
     selectedTrain: this.store.select(selectSelectedTrain),
     selectedTrainId: this.store.select(selectSelectedTrainId),
     batchSelection: this.store.select(selectBatchSelection),
@@ -346,7 +407,18 @@ export class TimetableEditorPageComponent implements OnInit {
     summary: this.store.select(selectConflictSummary),
     printSectionId: this.store.select(selectPrintSectionId),
     notices: this.store.select(selectNotices),
-  }).pipe(map((state) => state));
+    hasDraft: this.store.select(selectHasDraft),
+    publishError: this.store.select(selectPublishError),
+    lastPublishedAt: this.store.select(selectLastPublishedAt),
+  }).pipe(
+    map((state) => ({
+      ...state,
+      // 打印/导出读取已发布版本；编辑时画布读取预演网络
+      canvasNetwork: state.printSectionId ? state.network : state.previewNetwork,
+      canvasTrains: state.printSectionId ? state.network.trains : state.visibleTrains,
+      canvasConflicts: state.printSectionId ? state.publishedConflicts : state.conflicts,
+    })),
+  );
 
   ngOnInit(): void {
     try {
@@ -438,6 +510,18 @@ export class TimetableEditorPageComponent implements OnInit {
 
   applyBatchShift(): void {
     this.store.dispatch(batchShift({ deltaMinutes: this.batchMinutes }));
+  }
+
+  publish(): void {
+    this.store.dispatch(publishDraft());
+  }
+
+  discardDraftAction(): void {
+    this.store.dispatch(discardDraft());
+  }
+
+  shiftBaselineAction(): void {
+    this.store.dispatch(shiftBaseline({ deltaMinutes: this.baselineMinutes }));
   }
 
   focusConflict(conflict: TimetableConflict): void {

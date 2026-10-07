@@ -2,7 +2,7 @@ import { AsyncPipe } from '@angular/common';
 import { Component, inject } from '@angular/core';
 import { RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
 import { Store } from '@ngrx/store';
-import { selectConflictSummary, selectNetwork } from './stores/timetable.selectors';
+import { selectNetwork, selectPublishedConflictSummary } from './stores/timetable.selectors';
 import { ButtonModule } from 'primeng/button';
 
 @Component({
@@ -24,9 +24,9 @@ import { ButtonModule } from 'primeng/button';
           <a routerLink="/analysis" routerLinkActive="active">冲突分析</a>
         </nav>
         <div class="header-status">
-          <span class="status-dot" [class.status-dot--danger]="(summary$ | async)?.danger"></span>
-          <span>安全监控</span>
-          <strong>{{ (summary$ | async)?.danger || 0 }} 项严重</strong>
+          <span class="status-dot" [class.status-dot--danger]="(publishedSummary$ | async)?.danger"></span>
+          <span>现行调度安全</span>
+          <strong>{{ (publishedSummary$ | async)?.danger || 0 }} 项严重</strong>
         </div>
       </header>
       <main><router-outlet></router-outlet></main>
@@ -36,5 +36,5 @@ import { ButtonModule } from 'primeng/button';
 export class AppComponent {
   private readonly store = inject(Store);
   readonly network$ = this.store.select(selectNetwork);
-  readonly summary$ = this.store.select(selectConflictSummary);
+  readonly publishedSummary$ = this.store.select(selectPublishedConflictSummary);
 }

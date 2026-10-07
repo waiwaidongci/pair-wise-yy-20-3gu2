@@ -1,4 +1,5 @@
 import {
+  DraftChange,
   ImportedNetworkFile,
   RailSection,
   Station,
@@ -54,23 +55,26 @@ export function createMockNetwork(): TrainNetwork {
   });
 
   const trains: Train[] = [];
-  const categories: Train['category'][] = ['高铁', '动车', '普速', '货运'];
-  const startTimes = [330, 390, 450, 510, 570, 630, 690];
+  // 按速度分块：越快的路由越靠前（始终在前），同路由同速度、同方向大间隔，
+  // 对向按方向固定股道，保证基线运行图零冲突（发布默认可通过）。
+  const routeCategories: Train['category'][] = ['高铁', '动车', '普速', '货运'];
+  const trainsPerRoute = 10;
+  const gapMin = 18;
+  const baseGapMin = 180;
 
-  startTimes.forEach((baseStart, routeIndex) => {
-    for (let offset = 0; offset < 38; offset += 1) {
-      const direction = (offset + routeIndex) % 2 === 0 ? 'up' : 'down';
-      const category = categories[(offset + routeIndex) % categories.length];
+  routeCategories.forEach((category, routeIndex) => {
+    const baseStart = 330 + routeIndex * baseGapMin;
+    for (let offset = 0; offset < trainsPerRoute; offset += 1) {
+      const direction = offset % 2 === 0 ? 'up' : 'down';
       const numberPrefix = category === '高铁' ? 'G' : category === '动车' ? 'D' : category === '货运' ? 'X' : 'K';
-      const trainIndex = routeIndex * 38 + offset + 1;
-      const departureBase = baseStart + offset * 7 + routeIndex * 3;
+      const trainIndex = routeIndex * trainsPerRoute + offset + 1;
       trains.push(
         buildTrain({
           index: trainIndex,
           number: `${numberPrefix}${1200 + trainIndex}`,
           category,
           direction,
-          departureBase,
+          departureBase: baseStart + offset * gapMin,
           stations,
           sections,
         }),
@@ -115,7 +119,8 @@ function buildTrain(input: BuildTrainInput): Train {
     }
     const actualArrival = stationIndex === 0 ? cursor : cursor;
     const departure = actualArrival + dwell;
-    const track = station.tracks[input.index % station.tracks.length];
+    // 按方向固定股道：上行 I 道、下行 II 道，避免对向列车共用股道
+    const track = station.tracks[input.direction === 'up' ? 0 : 1];
     stops.push({
       stationId: station.id,
       kind: skip ? 'pass' : 'stop',
@@ -210,6 +215,39 @@ export function updateStop(train: Train, stationId: string, changes: Partial<Tra
   return {
     ...train,
     stops: train.stops.map((stop) => (stop.stationId === stationId ? { ...stop, ...changes } : stop)),
+  };
+}
+
+/**
+ * 把预演批次里的调整按顺序应用到已发布网络，得到预演网络。
+ * shift 累积叠加，stop 按站覆盖；批次为空时直接返回原网络（引用不变）。
+ */
+export function applyDraft(network: TrainNetwork, draft: DraftChange[]): TrainNetwork {
+  if (draft.length === 0) return network;
+  return draft.reduce<TrainNetwork>((current, change) => {
+    if (change.kind === 'shift') {
+      return {
+        ...current,
+        trains: current.trains.map((train) =>
+          train.id === change.trainId ? shiftTrain(train, change.deltaMinutes) : train,
+        ),
+      };
+    }
+    return {
+      ...current,
+      trains: current.trains.map((train) =>
+        train.id === change.trainId ? updateStop(train, change.stationId, change.changes) : train,
+      ),
+    };
+  }, network);
+}
+
+/** 全局基准时刻平移：对所有列车生效（基准时刻改动后旧批次失效）。 */
+export function shiftAllTrains(network: TrainNetwork, deltaMinutes: number): TrainNetwork {
+  if (deltaMinutes === 0) return network;
+  return {
+    ...network,
+    trains: network.trains.map((train) => shiftTrain(train, deltaMinutes)),
   };
 }
 

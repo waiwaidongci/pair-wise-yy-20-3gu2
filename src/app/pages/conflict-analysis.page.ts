@@ -7,7 +7,7 @@ import { SelectModule } from 'primeng/select';
 import { TableModule } from 'primeng/table';
 import { TagModule } from 'primeng/tag';
 import { combineLatest, map } from 'rxjs';
-import { selectConflicts, selectNetwork } from '../stores/timetable.selectors';
+import { selectNetwork, selectPublishedConflicts } from '../stores/timetable.selectors';
 import { ConflictType, TimetableConflict } from '../types/timetable';
 import { formatTime } from '../utils/time';
 
@@ -104,7 +104,7 @@ export class ConflictAnalysisPageComponent {
   typeFilter: ConflictType | 'all' = 'all';
 
   readonly viewModel$ = combineLatest({
-    conflicts: this.store.select(selectConflicts),
+    conflicts: this.store.select(selectPublishedConflicts),
     network: this.store.select(selectNetwork),
   }).pipe(
     map(({ conflicts, network }) => ({

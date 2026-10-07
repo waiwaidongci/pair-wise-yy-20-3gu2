@@ -85,14 +85,30 @@ export interface TimetableFilter {
   direction: TrainDirection | 'all';
 }
 
+/**
+ * 预演批次中的一条调整。
+ * - shift：整列平移 deltaMinutes（相对时刻，可叠加）
+ * - stop：单站时刻/作业方式/股道覆盖（绝对量，后写覆盖前写）
+ */
+export type DraftChange =
+  | { kind: 'shift'; trainId: string; deltaMinutes: number }
+  | { kind: 'stop'; trainId: string; stationId: string; changes: Partial<TrainStop> };
+
 export interface TimetableState {
-  network: TrainNetwork;
+  /** 已发布版本（现行调度），分析/导出/打印都读它 */
+  publishedNetwork: TrainNetwork;
+  /** 预演批次：尚未提交的调整集合，只在预演（画布）里生效 */
+  draft: DraftChange[];
   filter: TimetableFilter;
   viewport: ViewportState;
   selectedTrainId: string | null;
   batchSelection: string[];
   printSectionId: string | null;
   notices: string[];
+  /** 最近一次发布是否被回滚（全图重算发现严重冲突） */
+  publishError: string | null;
+  /** 最近一次成功发布的时间戳 */
+  lastPublishedAt: number | null;
 }
 
 export interface ImportedNetworkFile {

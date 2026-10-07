@@ -18,6 +18,12 @@ export const updateTrainStop = createAction(
   '[Timetable] Update train stop',
   props<{ trainId: string; stationId: string; changes: Partial<TrainStop> }>(),
 );
+export const publishDraft = createAction('[Timetable] Publish draft');
+export const discardDraft = createAction('[Timetable] Discard draft');
+export const shiftBaseline = createAction(
+  '[Timetable] Shift baseline',
+  props<{ deltaMinutes: number }>(),
+);
 export const setPrintSection = createAction('[Timetable] Set print section', props<{ sectionId: string | null }>());
 export const importNetwork = createAction('[Timetable] Import network', props<{ network: TrainNetwork }>());
 export const addNotice = createAction('[Timetable] Add notice', props<{ message: string }>());
