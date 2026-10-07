@@ -1,5 +1,8 @@
 import {
+  DraftTrain,
   ImportedNetworkFile,
+  PendingChange,
+  PublishValidation,
   RailSection,
   Station,
   TimetableConflict,
@@ -213,6 +216,231 @@ export function updateStop(train: Train, stationId: string, changes: Partial<Tra
   };
 }
 
+/** 把一次拖线/平移累计到该列车的待发布草稿中（不触碰现行运行图） */
+export function stageShift(
+  entry: DraftTrain | undefined,
+  publishedTrain: Train,
+  deltaMinutes: number,
+): DraftTrain {
+  const draft = shiftTrain(entry?.draft ?? cloneTrain(publishedTrain), deltaMinutes);
+  const totalDelta = (entry?.changes.find((change) => change.kind === 'shift')?.deltaMinutes ?? 0) + deltaMinutes;
+  const others = entry?.changes.filter((change) => change.kind !== 'shift') ?? [];
+  if (Math.abs(totalDelta) < 0.001) {
+    // 累计平移归零：若没有其它改动，草稿整体消失（由调用方判断）
+    return {
+      trainId: publishedTrain.id,
+      trainNumber: publishedTrain.number,
+      draft,
+      changes: others,
+    };
+  }
+  const existingShift = entry?.changes.find((change) => change.kind === 'shift');
+  const shiftChange: PendingChange = {
+    id: existingShift?.id ?? `shift:${publishedTrain.id}`,
+    kind: 'shift',
+    detail: `整线平移 ${formatSigned(totalDelta)} 分钟`,
+    deltaMinutes: totalDelta,
+  };
+  return {
+    trainId: publishedTrain.id,
+    trainNumber: publishedTrain.number,
+    draft,
+    changes: [...others, shiftChange],
+  };
+}
+
+/** 把停站作业或股道改动记录到待发布草稿 */
+export function stageStopChange(
+  entry: DraftTrain | undefined,
+  publishedTrain: Train,
+  stationId: string,
+  changes: Partial<TrainStop>,
+  stationName?: string,
+): DraftTrain {
+  const draft = updateStop(entry?.draft ?? cloneTrain(publishedTrain), stationId, changes);
+  const pending: PendingChange[] = [...(entry?.changes ?? [])];
+  const place = stationName ?? stationId;
+
+  if ('kind' in changes && changes.kind !== undefined) {
+    upsertChange(pending, `stop:${publishedTrain.id}:${stationId}:kind`, {
+      kind: 'stop',
+      detail: `${place} 作业改为${stopKindLabel(changes.kind)}`,
+      deltaMinutes: 0,
+    });
+  }
+  if ('departure' in changes && changes.departure !== undefined) {
+    const stop = draft.stops.find((item) => item.stationId === stationId);
+    upsertChange(pending, `stop:${publishedTrain.id}:${stationId}:departure`, {
+      kind: 'stop',
+      detail: `${place} 发车时刻改为 ${Math.round((stop?.departure ?? changes.departure) * 10) / 10} 分基准`,
+      deltaMinutes: 0,
+    });
+  }
+  if ('trackId' in changes && changes.trackId !== undefined) {
+    upsertChange(pending, `track:${publishedTrain.id}:${stationId}`, {
+      kind: 'track',
+      detail: `${place} 改入 ${changes.trackId.split('-').pop() ?? changes.trackId} 道`,
+      deltaMinutes: 0,
+    });
+  }
+
+  return {
+    trainId: publishedTrain.id,
+    trainNumber: publishedTrain.number,
+    draft,
+    changes: pending,
+  };
+}
+
+function upsertChange(changes: PendingChange[], id: string, patch: Omit<PendingChange, 'id'>): void {
+  const index = changes.findIndex((change) => change.id === id);
+  if (index >= 0) {
+    changes[index] = { ...changes[index], ...patch };
+  } else {
+    changes.push({ id, ...patch });
+  }
+}
+
+function cloneTrain(train: Train): Train {
+  return { ...train, stops: train.stops.map((stop) => ({ ...stop })) };
+}
+
+function formatSigned(value: number): string {
+  const rounded = Math.round(value * 10) / 10;
+  return rounded > 0 ? `+${rounded}` : `${rounded}`;
+}
+
+function stopKindLabel(kind: TrainStop['kind']): string {
+  switch (kind) {
+    case 'stop':
+      return '停站';
+    case 'pass':
+      return '通过';
+    case 'meet':
+      return '会让';
+    case 'overtake':
+      return '越行';
+  }
+}
+
+/** 将待发布批次叠加到现行运行图，得到预演用的全图 */
+export function mergeDrafts(
+  published: TrainNetwork,
+  draftTrains: Record<string, DraftTrain>,
+): TrainNetwork {
+  if (Object.keys(draftTrains).length === 0) return published;
+  return {
+    ...published,
+    trains: published.trains.map((train) => draftTrains[train.id]?.draft ?? train),
+  };
+}
+
+/**
+ * 提交时的全图重算：区间追踪、到发线占用、越行关系。
+ * 不接收筛选集合——隐藏的车同样参与。
+ *
+ * 传入 baselineConflicts（现行版本的全量冲突）时，会识别本次批次新引入的
+ * 严重冲突：既存基线问题不阻塞发布，但新造成的危险冲突会导致提交失败。
+ */
+export function validateFullNetwork(
+  network: TrainNetwork,
+  baselineConflicts?: TimetableConflict[],
+): PublishValidation {
+  recomputeOvertakeRelations(network);
+  const conflicts = computeConflicts(network);
+  const dangerConflicts = conflicts.filter((conflict) => conflict.severity === 'danger');
+  const baselineDangerKeys = new Set(
+    (baselineConflicts ?? [])
+      .filter((conflict) => conflict.severity === 'danger')
+      .map((conflict) => conflictDedupKey(conflict)),
+  );
+  const newDangerConflicts = baselineConflicts
+    ? dangerConflicts.filter((conflict) => !baselineDangerKeys.has(conflictDedupKey(conflict)))
+    : [];
+  return {
+    conflicts,
+    dangerCount: dangerConflicts.length,
+    warningCount: conflicts.filter((conflict) => conflict.severity === 'warning').length,
+    newDangerCount: newDangerConflicts.length,
+    newDangerConflicts,
+  };
+}
+
+/**
+ * 冲突去重键：不包含具体时刻，仅按冲突类型、区间/车站、涉及列车识别。
+ * 这样批次把整车平移后，原本就存在的追踪冲突不会被误判为"新引入"。
+ */
+function conflictDedupKey(conflict: TimetableConflict): string {
+  const trains = [...conflict.trainIds].sort().join('|');
+  return `${conflict.type}:${conflict.sectionId ?? ''}:${conflict.stationId ?? ''}:${trains}`;
+}
+
+/**
+ * 依据同方向列车在相邻共用站的到发次序，重算区间越行关系：
+ * 后发先至即为越行，被越行且在站停留的列车标记到对应停站。
+ * 会让（meet）标记保持不变。
+ */
+export function recomputeOvertakeRelations(network: TrainNetwork): void {
+  network.trains.forEach((train) => {
+    train.stops.forEach((stop) => {
+      if (stop.kind === 'overtake') {
+        stop.kind = 'stop';
+        stop.meetTrainNumber = undefined;
+      }
+    });
+  });
+
+  for (let i = 0; i < network.trains.length; i += 1) {
+    for (let j = i + 1; j < network.trains.length; j += 1) {
+      const first = network.trains[i];
+      const second = network.trains[j];
+      if (first.direction !== second.direction) continue;
+      const invertedStations = findOvertakeStation(first, second, network);
+      if (!invertedStations) continue;
+      const [overtaker, overtaken, stationId] = invertedStations;
+      const stop = overtaken.stops.find((item) => item.stationId === stationId);
+      if (stop && stop.kind !== 'meet') {
+        stop.kind = 'overtake';
+        stop.meetTrainNumber = overtaker.number;
+      }
+    }
+  }
+}
+
+/** 返回 [越行车, 被越行车, 越行发生的车站]，无越行则为 null */
+function findOvertakeStation(
+  trainA: Train,
+  trainB: Train,
+  network: TrainNetwork,
+): [Train, Train, string] | null {
+  const stations = trainA.direction === 'up' ? network.stations : [...network.stations].reverse();
+  let previousShared: { stationId: string; aDep: number; bDep: number } | null = null;
+  for (const station of stations) {
+    const stopA = trainA.stops.find((item) => item.stationId === station.id);
+    const stopB = trainB.stops.find((item) => item.stationId === station.id);
+    if (!stopA || !stopB) continue;
+    if (previousShared) {
+      const orderBefore = Math.sign(previousShared.aDep - previousShared.bDep);
+      const orderAfter = Math.sign(stopA.arrival - stopB.arrival);
+      if (orderBefore !== 0 && orderAfter !== 0 && orderBefore !== orderAfter) {
+        // 先在本站到达的车完成越行；被越行车在前一共用站或本站停留待避
+        const overtaker = orderAfter > 0 ? trainB : trainA;
+        const overtaken = orderAfter > 0 ? trainA : trainB;
+        const waitHere = overtaken.stops.find((item) => item.stationId === station.id);
+        const waitBefore = overtaken.stops.find((item) => item.stationId === previousShared!.stationId);
+        if (waitHere && waitHere.departure - waitHere.arrival > 0.01) {
+          return [overtaker, overtaken, station.id];
+        }
+        if (waitBefore && waitBefore.departure - waitBefore.arrival > 0.01) {
+          return [overtaker, overtaken, previousShared.stationId];
+        }
+      }
+    }
+    previousShared = { stationId: station.id, aDep: stopA.departure, bDep: stopB.departure };
+  }
+  return null;
+}
+
 export function getSectionEndpoints(section: RailSection, network: TrainNetwork): [Station, Station] | null {
   const from = network.stations.find((station) => station.id === section.fromStationId);
   const to = network.stations.find((station) => station.id === section.toStationId);
@@ -223,6 +451,22 @@ export function computeConflicts(network: TrainNetwork, visibleTrainIds?: Set<st
   const conflicts: TimetableConflict[] = [];
   const stationMap = new Map(network.stations.map((station) => [station.id, station]));
   const sectionMap = new Map(network.sections.map((section) => [section.id, section]));
+  const sectionByEndpoints = new Map(
+    network.sections.flatMap((section) => [
+      [`${section.fromStationId}>${section.toStationId}`, section],
+      [`${section.toStationId}>${section.fromStationId}`, section],
+    ]),
+  );
+  // 预建停站索引，供全图重算（266+ 趟列车、含被隐藏列车）时避免重复查找
+  const stopIndexByTrain = new Map<string, Map<string, TrainStop>>(
+    network.trains.map((train) => [train.id, new Map(train.stops.map((stop) => [stop.stationId, stop]))]),
+  );
+  const stopPositionByTrain = new Map<string, Map<string, number>>(
+    network.trains.map((train) => [
+      train.id,
+      new Map(train.stops.map((stop, index) => [stop.stationId, index])),
+    ]),
+  );
   const stationOccupancy = new Map<string, Array<{ train: Train; stop: TrainStop }>>();
 
   network.trains.forEach((train) => {
@@ -235,11 +479,7 @@ export function computeConflicts(network: TrainNetwork, visibleTrainIds?: Set<st
 
       const nextStop = train.stops[stopIndex + 1];
       if (!nextStop) return;
-      const section = network.sections.find(
-        (candidate) =>
-          (candidate.fromStationId === stop.stationId && candidate.toStationId === nextStop.stationId) ||
-          (candidate.toStationId === stop.stationId && candidate.fromStationId === nextStop.stationId),
-      );
+      const section = sectionByEndpoints.get(`${stop.stationId}>${nextStop.stationId}`);
       if (!section) return;
       const departure = Math.min(stop.departure, nextStop.arrival);
       const arrival = Math.max(stop.departure, nextStop.arrival);
@@ -250,13 +490,13 @@ export function computeConflicts(network: TrainNetwork, visibleTrainIds?: Set<st
           (!visibleTrainIds || visibleTrainIds.has(candidate.id)),
       );
       peers.forEach((peer) => {
-        const peerStopsInOrder =
-          peer.stops.findIndex((item) => item.stationId === stop.stationId) <
-          peer.stops.findIndex((item) => item.stationId === nextStop.stationId);
-        if (!peerStopsInOrder) return;
-        const peerStart = peer.stops.find((item) => item.stationId === stop.stationId);
-        const peerEnd = peer.stops.find((item) => item.stationId === nextStop.stationId);
+        const peerStopIndex = stopIndexByTrain.get(peer.id);
+        const peerStart = peerStopIndex?.get(stop.stationId);
+        const peerEnd = peerStopIndex?.get(nextStop.stationId);
         if (!peerStart || !peerEnd) return;
+        const positions = stopPositionByTrain.get(peer.id);
+        const peerStopsInOrder = (positions?.get(stop.stationId) ?? 0) < (positions?.get(nextStop.stationId) ?? 0);
+        if (!peerStopsInOrder) return;
         const peerDeparture = Math.min(peerStart.departure, peerEnd.arrival);
         const peerArrival = Math.max(peerStart.departure, peerEnd.arrival);
         const gap = Math.abs(peerDeparture - departure);

@@ -7,7 +7,8 @@ import { SelectModule } from 'primeng/select';
 import { TableModule } from 'primeng/table';
 import { TagModule } from 'primeng/tag';
 import { combineLatest, map } from 'rxjs';
-import { selectConflicts, selectNetwork } from '../stores/timetable.selectors';
+import { selectPublishedConflicts, selectPublishedNetwork } from '../stores/timetable.selectors';
+import { selectTrain } from '../stores/timetable.actions';
 import { ConflictType, TimetableConflict } from '../types/timetable';
 import { formatTime } from '../utils/time';
 
@@ -20,9 +21,9 @@ import { formatTime } from '../utils/time';
     <section class="analysis-page" *ngIf="viewModel$ | async as vm">
       <header class="analysis-header">
         <div>
-          <span>安全分析中心</span>
+          <span>安全分析中心 · 已发布现行版本</span>
           <h1>冲突明细与调整窗口</h1>
-          <p>按具体区间、车站和列车列出冲突原因，并给出可执行的时间调整范围。</p>
+          <p>读取最近一次发布的全图结果（含被筛选隐藏的列车），编辑预演不会影响本页。</p>
         </div>
         <div class="analysis-kpis">
           <div><small>严重</small><strong class="danger">{{ vm.danger }}</strong></div>
@@ -104,8 +105,8 @@ export class ConflictAnalysisPageComponent {
   typeFilter: ConflictType | 'all' = 'all';
 
   readonly viewModel$ = combineLatest({
-    conflicts: this.store.select(selectConflicts),
-    network: this.store.select(selectNetwork),
+    conflicts: this.store.select(selectPublishedConflicts),
+    network: this.store.select(selectPublishedNetwork),
   }).pipe(
     map(({ conflicts, network }) => ({
       conflicts,
@@ -154,7 +155,7 @@ export class ConflictAnalysisPageComponent {
     }
     const trainId = conflict.trainIds[0];
     if (trainId) {
-      this.store.dispatch({ type: '[Timetable] Select train', trainId });
+      this.store.dispatch(selectTrain({ trainId }));
     }
   }
 

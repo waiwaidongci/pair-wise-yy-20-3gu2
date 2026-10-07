@@ -23,24 +23,35 @@ import { GraphCanvasComponent } from '../components/graph-canvas.component';
 import { TrainInspectorComponent } from '../components/train-inspector.component';
 import {
   addNotice,
+  adjustBaseTime,
   batchShift,
   clearBatchSelection,
+  discardAllDrafts,
+  discardDraft,
+  dismissNotice,
   importNetwork,
   moveTrain,
+  publishBatch,
   resetViewport,
   restorePersistedState,
   selectTrain,
   setPrintSection,
+  toggleBatchTrain,
   updateFilter,
   updateTrainStop,
   updateViewport,
 } from '../stores/timetable.actions';
 import {
   selectBatchSelection,
+  selectBatchSummary,
   selectConflictSummary,
   selectConflicts,
+  selectDraftTrains,
   selectFilter,
-  selectNetwork,
+  selectPreviewNetwork,
+  selectPublishedAt,
+  selectPublishedConflicts,
+  selectPublishedNetwork,
   selectNotices,
   selectPrintSectionId,
   selectSelectedTrainId,
@@ -48,10 +59,12 @@ import {
   selectSelectedTrain,
   selectViewport,
   selectVisibleTrains,
+  selectPublishError,
+  selectPublishStatus,
 } from '../stores/timetable.selectors';
-import { ConflictType, TimetableConflict } from '../types/timetable';
+import { TimetableConflict, TrainNetwork } from '../types/timetable';
 import { formatTime } from '../utils/time';
-import { normalizeImportedNetwork } from '../utils/timetable-utils';
+import { filterTrains, normalizeImportedNetwork } from '../utils/timetable-utils';
 
 @Component({
   selector: 'app-timetable-editor',
@@ -80,7 +93,10 @@ import { normalizeImportedNetwork } from '../utils/timetable-utils';
           <div class="toolbar__title">
             <span>运行图编辑</span>
             <strong>{{ vm.network.lineName }}</strong>
-            <small>{{ vm.visibleTrains.length }} / {{ vm.network.trains.length }} 趟列车</small>
+            <small>
+              {{ vm.visibleTrains.length }} / {{ vm.network.trains.length }} 趟列车 ·
+              现行版本 {{ vm.publishedAtLabel }}
+            </small>
           </div>
           <div class="toolbar__filters">
             <span class="search-box">
@@ -146,10 +162,10 @@ import { normalizeImportedNetwork } from '../utils/timetable-utils';
             ></p-button>
             <p-button
               icon="pi pi-download"
-              label="导出数据"
+              label="导出现行版本"
               severity="secondary"
               size="small"
-              (onClick)="exportNetwork(vm.network)"
+              (onClick)="exportNetwork(vm.publishedNetwork)"
             ></p-button>
           </div>
         </div>
@@ -157,7 +173,7 @@ import { normalizeImportedNetwork } from '../utils/timetable-utils';
         <div class="summary-bar">
           <div class="summary-item">
             <i class="pi pi-exclamation-triangle"></i>
-            <span>严重冲突</span>
+            <span>预演严重冲突</span>
             <strong class="danger">{{ vm.summary.danger }}</strong>
           </div>
           <div class="summary-item">
@@ -190,7 +206,7 @@ import { normalizeImportedNetwork } from '../utils/timetable-utils';
             ></p-inputNumber>
             <p-button
               icon="pi pi-arrows-h"
-              label="应用到选中"
+              label="收入批次"
               size="small"
               severity="secondary"
               [disabled]="vm.batchSelection.length === 0"
@@ -201,9 +217,32 @@ import { normalizeImportedNetwork } from '../utils/timetable-utils';
               <button type="button" (click)="clearBatch()">清除</button>
             </span>
           </div>
+          <div class="baseline-control">
+            <span>基准时刻</span>
+            <p-button
+              icon="pi pi-angle-double-left"
+              label="-30 分"
+              size="small"
+              severity="secondary"
+              [text]="true"
+              [disabled]="vm.batchSummary.trainCount > 0"
+              pTooltip="改动基准时刻后旧批次立即失效"
+              (onClick)="shiftBaseTime(-30)"
+            ></p-button>
+            <p-button
+              icon="pi pi-angle-double-right"
+              label="+30 分"
+              size="small"
+              severity="secondary"
+              [text]="true"
+              [disabled]="vm.batchSummary.trainCount > 0"
+              pTooltip="改动基准时刻后旧批次立即失效"
+              (onClick)="shiftBaseTime(30)"
+            ></p-button>
+          </div>
           <div class="print-control">
             <p-select
-              [options]="vm.network.sections"
+              [options]="vm.publishedNetwork.sections"
               [(ngModel)]="printSectionId"
               optionLabel="id"
               optionValue="id"
@@ -220,6 +259,71 @@ import { normalizeImportedNetwork } from '../utils/timetable-utils';
             ></p-button>
           </div>
         </div>
+
+        <div class="batch-dock" [class.batch-dock--empty]="vm.batchSummary.trainCount === 0">
+          <div class="batch-dock__status">
+            <span class="batch-dock__dot"></span>
+            <ng-container *ngIf="vm.batchSummary.trainCount > 0; else noBatch">
+              <strong>待发布批次</strong>
+              <span>
+                {{ vm.batchSummary.trainCount }} 趟列车、{{ vm.batchSummary.changeCount }} 项调整
+                仅在预演中生效，尚未覆盖现行调度
+              </span>
+            </ng-container>
+            <ng-template #noBatch>
+              <strong>现行调度无待发布调整</strong>
+              <span>拖线、批量平移、停站与股道改动会先收入批次</span>
+            </ng-template>
+          </div>
+          <div class="batch-dock__changes" *ngIf="vm.batchSummary.trainCount > 0">
+            <button
+              type="button"
+              class="batch-chip"
+              *ngFor="let entry of vm.batchEntries"
+              [class.batch-chip--selected]="entry.trainId === vm.selectedTrainId"
+              (click)="selectTrainAction(entry.trainId)"
+            >
+              <strong>{{ entry.trainNumber }}</strong>
+              <span>{{ entry.changes.length }} 项</span>
+              <i class="pi pi-times" (click)="discardDraft(entry.trainId, $event)"></i>
+            </button>
+          </div>
+          <div class="batch-dock__actions">
+            <p-tag
+              *ngIf="vm.publishStatus === 'failed'"
+              severity="danger"
+              value="发布失败已回滚"
+            ></p-tag>
+            <p-tag
+              *ngIf="vm.publishStatus === 'publishing'"
+              severity="info"
+              value="全图重算中…"
+            ></p-tag>
+            <p-button
+              icon="pi pi-undo"
+              label="放弃批次"
+              severity="secondary"
+              size="small"
+              [outlined]="true"
+              [disabled]="vm.batchSummary.trainCount === 0 || vm.publishStatus === 'publishing'"
+              (onClick)="discardAll()"
+            ></p-button>
+            <p-button
+              icon="pi pi-send"
+              label="提交发布"
+              size="small"
+              [loading]="vm.publishStatus === 'publishing'"
+              [disabled]="vm.batchSummary.trainCount === 0"
+              pTooltip="对全图重算区间追踪、到发线占用和越行关系（隐藏的车也参与）"
+              (onClick)="publish()"
+            ></p-button>
+          </div>
+        </div>
+        <p class="batch-error" *ngIf="vm.publishError">
+          <i class="pi pi-exclamation-circle"></i>
+          {{ vm.publishError }}
+          <span>原图与分析结果已保留，批次仍可继续修改。</span>
+        </p>
 
         <div class="workspace">
           <aside class="workspace__left panel">
@@ -245,11 +349,13 @@ import { normalizeImportedNetwork } from '../utils/timetable-utils';
             </div>
             <app-graph-canvas
               [network]="vm.network"
+              [publishedNetwork]="vm.publishedNetwork"
               [trains]="vm.visibleTrains"
-              [conflicts]="vm.conflicts"
+              [publishedTrains]="vm.publishedVisibleTrains"
+              [conflicts]="vm.printSectionId ? vm.publishedConflicts : vm.conflicts"
               [viewport]="vm.viewport"
-              [selectedTrainId]="vm.selectedTrainId"
-              [batchSelection]="vm.batchSelection"
+              [selectedTrainId]="vm.printSectionId ? null : vm.selectedTrainId"
+              [batchSelection]="vm.printSectionId ? [] : vm.batchSelection"
               [printSectionId]="vm.printSectionId"
               (trainSelected)="selectTrainAction($event)"
               (trainMoved)="moveTrainAction($event)"
@@ -257,7 +363,7 @@ import { normalizeImportedNetwork } from '../utils/timetable-utils';
               (batchToggled)="toggleBatch($event)"
             ></app-graph-canvas>
             <footer class="graph-panel__footer">
-              <span>视图缩放 {{ (vm.viewport.scaleX * 100).toFixed(0) }}%</span>
+              <span>视图缩放 {{ (vm.viewport.scaleX * 100).toFixed(0) }}%（{{ vm.batchSummary.trainCount ? '预演含未发布批次' : '与现行版本一致' }}）</span>
               <span>Alt + 点击可加入批量选择</span>
               <span *ngIf="vm.batchSelection.length">批量选中 {{ vm.batchSelection.length }} 趟</span>
             </footer>
@@ -334,7 +440,8 @@ export class TimetableEditorPageComponent implements OnInit {
   importDialog = false;
 
   readonly viewModel$ = combineLatest({
-    network: this.store.select(selectNetwork),
+    network: this.store.select(selectPreviewNetwork),
+    publishedNetwork: this.store.select(selectPublishedNetwork),
     visibleTrains: this.store.select(selectVisibleTrains),
     selectedTrain: this.store.select(selectSelectedTrain),
     selectedTrainId: this.store.select(selectSelectedTrainId),
@@ -342,11 +449,29 @@ export class TimetableEditorPageComponent implements OnInit {
     filter: this.store.select(selectFilter),
     viewport: this.store.select(selectViewport),
     conflicts: this.store.select(selectConflicts),
+    publishedConflicts: this.store.select(selectPublishedConflicts),
     selectedConflicts: this.store.select(selectSelectedConflicts),
     summary: this.store.select(selectConflictSummary),
     printSectionId: this.store.select(selectPrintSectionId),
     notices: this.store.select(selectNotices),
-  }).pipe(map((state) => state));
+    drafts: this.store.select(selectDraftTrains),
+    batchSummary: this.store.select(selectBatchSummary),
+    publishStatus: this.store.select(selectPublishStatus),
+    publishError: this.store.select(selectPublishError),
+    publishedAt: this.store.select(selectPublishedAt),
+  }).pipe(
+    map((state) => ({
+      ...state,
+      publishedVisibleTrains: filterTrains(
+        state.publishedNetwork,
+        state.filter.query,
+        state.filter.categories,
+        state.filter.direction,
+      ),
+      batchEntries: Object.values(state.drafts),
+      publishedAtLabel: new Date(state.publishedAt).toLocaleString('zh-CN', { hour12: false }),
+    })),
+  );
 
   ngOnInit(): void {
     try {
@@ -410,7 +535,7 @@ export class TimetableEditorPageComponent implements OnInit {
   }
 
   dismissNoticeAction(index: number): void {
-    this.store.dispatch({ type: '[Timetable] Dismiss notice', index });
+    this.store.dispatch(dismissNotice({ index }));
   }
 
   shiftSelected(deltaMinutes: number, trainId: string | null): void {
@@ -433,11 +558,28 @@ export class TimetableEditorPageComponent implements OnInit {
   }
 
   toggleBatch(trainId: string): void {
-    this.store.dispatch({ type: '[Timetable] Toggle batch train', trainId });
+    this.store.dispatch(toggleBatchTrain({ trainId }));
   }
 
   applyBatchShift(): void {
     this.store.dispatch(batchShift({ deltaMinutes: this.batchMinutes }));
+  }
+
+  publish(): void {
+    this.store.dispatch(publishBatch());
+  }
+
+  discardDraft(trainId: string, event: MouseEvent): void {
+    event.stopPropagation();
+    this.store.dispatch(discardDraft({ trainId }));
+  }
+
+  discardAll(): void {
+    this.store.dispatch(discardAllDrafts());
+  }
+
+  shiftBaseTime(deltaMinutes: number): void {
+    this.store.dispatch(adjustBaseTime({ deltaMinutes }));
   }
 
   focusConflict(conflict: TimetableConflict): void {
@@ -466,11 +608,11 @@ export class TimetableEditorPageComponent implements OnInit {
     if (!file) return;
     try {
       const raw = JSON.parse(await file.text()) as Record<string, unknown>;
-      let fallbackNetwork: unknown;
-      this.store.select(selectNetwork).subscribe((network) => {
+      let fallbackNetwork: TrainNetwork | undefined;
+      this.store.select(selectPublishedNetwork).subscribe((network) => {
         fallbackNetwork = network;
       }).unsubscribe();
-      const network = normalizeImportedNetwork(raw, fallbackNetwork as never);
+      const network = normalizeImportedNetwork(raw, fallbackNetwork as TrainNetwork);
       this.store.dispatch(importNetwork({ network }));
       this.importDialog = false;
     } catch (error) {

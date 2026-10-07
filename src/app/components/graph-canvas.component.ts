@@ -21,7 +21,7 @@ import {
   ViewportState,
 } from '../types/timetable';
 import { formatTime } from '../utils/time';
-import { computeConflicts, visibleTimeRange } from '../utils/timetable-utils';
+import { visibleTimeRange } from '../utils/timetable-utils';
 
 interface Point {
   x: number;
@@ -114,8 +114,12 @@ interface Point {
 export class GraphCanvasComponent implements AfterViewInit, OnChanges, OnDestroy {
   @ViewChild('canvas', { static: true }) canvasRef!: ElementRef<HTMLCanvasElement>;
 
+  /** 编辑预演时显示的运行图（含待发布批次）；打印时改读 publishedNetwork */
   @Input({ required: true }) network!: TrainNetwork;
+  /** 现行已发布运行图，仅打印区间时使用，保证预演不覆盖现行调度 */
+  @Input() publishedNetwork: TrainNetwork | null = null;
   @Input() trains: Train[] = [];
+  @Input() publishedTrains: Train[] = [];
   @Input() conflicts: TimetableConflict[] = [];
   @Input() viewport: ViewportState = { scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0 };
   @Input() selectedTrainId: string | null = null;
@@ -145,7 +149,15 @@ export class GraphCanvasComponent implements AfterViewInit, OnChanges, OnDestroy
   }
 
   ngOnChanges(changes: SimpleChanges): void {
-    if (changes['network'] || changes['trains'] || changes['conflicts'] || changes['viewport'] || changes['selectedTrainId']) {
+    if (
+      changes['network'] ||
+      changes['publishedNetwork'] ||
+      changes['trains'] ||
+      changes['publishedTrains'] ||
+      changes['conflicts'] ||
+      changes['viewport'] ||
+      changes['selectedTrainId']
+    ) {
       this.requestDraw();
     }
   }
@@ -193,7 +205,7 @@ export class GraphCanvasComponent implements AfterViewInit, OnChanges, OnDestroy
     this.dragStartX = point.x;
     this.dragStartY = point.y;
     this.dragDelta = 0;
-    this.dragTrainNumber = this.network.trains.find((train) => train.id === hit)?.number ?? '';
+    this.dragTrainNumber = this.effectiveNetwork.trains.find((train) => train.id === hit)?.number ?? '';
   }
 
   onPointerMove(event: PointerEvent): void {
@@ -238,6 +250,14 @@ export class GraphCanvasComponent implements AfterViewInit, OnChanges, OnDestroy
     });
   }
 
+  private get effectiveNetwork(): TrainNetwork {
+    return this.printSectionId && this.publishedNetwork ? this.publishedNetwork : this.network;
+  }
+
+  private get effectiveTrains(): Train[] {
+    return this.printSectionId && this.publishedNetwork ? this.publishedTrains : this.trains;
+  }
+
   private draw(): void {
     const canvas = this.canvasRef.nativeElement;
     const parent = canvas.parentElement;
@@ -273,21 +293,22 @@ export class GraphCanvasComponent implements AfterViewInit, OnChanges, OnDestroy
     minKm: number;
     maxKm: number;
   } {
-    const [networkStart, networkEnd] = visibleTimeRange(this.network);
+    const network = this.effectiveNetwork;
+    const [networkStart, networkEnd] = visibleTimeRange(network);
     let minTime = networkStart;
     let maxTime = networkEnd;
-    let minKm = Math.min(...this.network.stations.map((station) => station.km));
-    let maxKm = Math.max(...this.network.stations.map((station) => station.km));
+    let minKm = Math.min(...network.stations.map((station) => station.km));
+    let maxKm = Math.max(...network.stations.map((station) => station.km));
 
     if (this.printSectionId) {
-      const section = this.network.sections.find((candidate) => candidate.id === this.printSectionId);
+      const section = network.sections.find((candidate) => candidate.id === this.printSectionId);
       if (section) {
-        const from = this.network.stations.find((station) => station.id === section.fromStationId);
-        const to = this.network.stations.find((station) => station.id === section.toStationId);
+        const from = network.stations.find((station) => station.id === section.fromStationId);
+        const to = network.stations.find((station) => station.id === section.toStationId);
         if (from && to) {
           minKm = Math.min(from.km, to.km) - 4;
           maxKm = Math.max(from.km, to.km) + 4;
-          const times = this.network.trains.flatMap((train) => {
+          const times = network.trains.flatMap((train) => {
             const fromStop = train.stops.find((stop) => stop.stationId === from.id);
             const toStop = train.stops.find((stop) => stop.stationId === to.id);
             return fromStop && toStop ? [fromStop.departure, toStop.arrival] : [];
@@ -363,7 +384,7 @@ export class GraphCanvasComponent implements AfterViewInit, OnChanges, OnDestroy
       context.stroke();
     }
 
-    this.network.stations.forEach((station) => {
+    this.effectiveNetwork.stations.forEach((station) => {
       const y = this.kmToY(station.km, geometry);
       if (y < geometry.top - 40 || y > geometry.bottom + 40) return;
       context.strokeStyle = '#c7d0dc';
@@ -424,17 +445,17 @@ export class GraphCanvasComponent implements AfterViewInit, OnChanges, OnDestroy
       let y1 = geometry.top;
       let y2 = geometry.bottom;
       if (conflict.sectionId) {
-        const section = this.network.sections.find((item) => item.id === conflict.sectionId);
+        const section = this.effectiveNetwork.sections.find((item) => item.id === conflict.sectionId);
         if (section) {
-          const from = this.network.stations.find((item) => item.id === section.fromStationId);
-          const to = this.network.stations.find((item) => item.id === section.toStationId);
+          const from = this.effectiveNetwork.stations.find((item) => item.id === section.fromStationId);
+          const to = this.effectiveNetwork.stations.find((item) => item.id === section.toStationId);
           if (from && to) {
             y1 = Math.min(this.kmToY(from.km, geometry), this.kmToY(to.km, geometry));
             y2 = Math.max(this.kmToY(from.km, geometry), this.kmToY(to.km, geometry));
           }
         }
       } else if (conflict.stationId) {
-        const station = this.network.stations.find((item) => item.id === conflict.stationId);
+        const station = this.effectiveNetwork.stations.find((item) => item.id === conflict.stationId);
         if (station) {
           const y = this.kmToY(station.km, geometry);
           y1 = y - 12;
@@ -457,9 +478,11 @@ export class GraphCanvasComponent implements AfterViewInit, OnChanges, OnDestroy
     geometry: ReturnType<GraphCanvasComponent['getGeometry']>,
   ): void {
     this.hitPoints.clear();
+    const network = this.effectiveNetwork;
+    const trains = this.effectiveTrains;
     const segmentIndex = new Map<string, Array<{ train: Train; departure: number; arrival: number }>>();
-    const stationMap = new Map(this.network.stations.map((station) => [station.id, station]));
-    this.trains.forEach((train) => {
+    const stationMap = new Map(network.stations.map((station) => [station.id, station]));
+    trains.forEach((train) => {
       const points = this.buildPoints(train, geometry);
       this.hitPoints.set(train.id, points);
       for (let index = 0; index < points.length - 1; index += 1) {
@@ -490,7 +513,7 @@ export class GraphCanvasComponent implements AfterViewInit, OnChanges, OnDestroy
     context.rect(geometry.left, geometry.top, geometry.right - geometry.left, geometry.bottom - geometry.top);
     context.clip();
 
-    this.trains.forEach((train) => {
+    trains.forEach((train) => {
       const points = this.hitPoints.get(train.id) ?? [];
       const selected = train.id === this.selectedTrainId;
       const batchSelected = this.batchSelection.includes(train.id);
@@ -538,7 +561,7 @@ export class GraphCanvasComponent implements AfterViewInit, OnChanges, OnDestroy
     });
 
     const drawnLabels = new Set<string>();
-    this.trains.forEach((train) => {
+    trains.forEach((train) => {
       if (!(train.id === this.selectedTrainId || this.batchSelection.includes(train.id))) return;
       const points = this.hitPoints.get(train.id) ?? [];
       const first = points[0];
@@ -561,7 +584,7 @@ export class GraphCanvasComponent implements AfterViewInit, OnChanges, OnDestroy
     });
 
     [this.selectedTrainId, ...this.batchSelection].filter(Boolean).forEach((trainId) => {
-      const train = this.trains.find((candidate) => candidate.id === trainId);
+      const train = trains.find((candidate) => candidate.id === trainId);
       const points = train ? this.hitPoints.get(train.id) ?? [] : [];
       const anchor = train?.direction === 'down' ? points[points.length - 1] : points[0];
       if (!anchor || !train) return;
@@ -578,7 +601,7 @@ export class GraphCanvasComponent implements AfterViewInit, OnChanges, OnDestroy
     train: Train,
     geometry: ReturnType<GraphCanvasComponent['getGeometry']>,
   ): Point[] {
-    const stationMap = new Map(this.network.stations.map((station) => [station.id, station]));
+    const stationMap = new Map(this.effectiveNetwork.stations.map((station) => [station.id, station]));
     const delta = train.id === this.draggingTrainId ? this.dragDelta : 0;
     const points: Point[] = [];
     train.stops.forEach((stop, index) => {
@@ -621,10 +644,11 @@ export class GraphCanvasComponent implements AfterViewInit, OnChanges, OnDestroy
     height: number,
   ): void {
     if (!this.printSectionId) return;
-    const section = this.network.sections.find((candidate) => candidate.id === this.printSectionId);
+    const network = this.effectiveNetwork;
+    const section = network.sections.find((candidate) => candidate.id === this.printSectionId);
     if (!section) return;
-    const from = this.network.stations.find((station) => station.id === section.fromStationId);
-    const to = this.network.stations.find((station) => station.id === section.toStationId);
+    const from = network.stations.find((station) => station.id === section.fromStationId);
+    const to = network.stations.find((station) => station.id === section.toStationId);
     context.fillStyle = '#17324d';
     context.font = '700 16px "Noto Sans SC", sans-serif';
     context.textAlign = 'left';
@@ -653,7 +677,7 @@ export class GraphCanvasComponent implements AfterViewInit, OnChanges, OnDestroy
   }
 
   private findSection(fromStationId: string, toStationId: string): RailSection | undefined {
-    return this.network.sections.find(
+    return this.effectiveNetwork.sections.find(
       (section) =>
         (section.fromStationId === fromStationId && section.toStationId === toStationId) ||
         (section.toStationId === fromStationId && section.fromStationId === toStationId),

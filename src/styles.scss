@@ -150,7 +150,7 @@ main {
 
 .editor-page {
   display: grid;
-  grid-template-rows: 56px 41px minmax(0, 1fr);
+  grid-template-rows: 56px 41px auto minmax(0, 1fr);
   height: 100%;
   background: #eef2f6;
 }
@@ -271,6 +271,130 @@ main {
 
 .batch-control p-inputNumber {
   width: 115px;
+}
+
+.baseline-control {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  color: #69768a;
+  font-size: 11px;
+}
+
+.batch-dock {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) minmax(0, 2fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 14px;
+  border-bottom: 1px solid #d7dfe9;
+  background: #f3f7fb;
+}
+
+.batch-dock--empty {
+  background: #f7f9fb;
+}
+
+.batch-dock__status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 9px;
+  align-items: baseline;
+}
+
+.batch-dock__status strong {
+  color: #1b4b73;
+  font-size: 12px;
+}
+
+.batch-dock__status span:not(.batch-dock__dot) {
+  color: #79879a;
+  font-size: 10px;
+}
+
+.batch-dock__dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #d9822b;
+  box-shadow: 0 0 0 3px rgba(217, 130, 43, 0.15);
+}
+
+.batch-dock--empty .batch-dock__dot {
+  background: #3a9e7f;
+  box-shadow: 0 0 0 3px rgba(58, 158, 127, 0.14);
+}
+
+.batch-dock__changes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.batch-chip {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  padding: 3px 6px 3px 9px;
+  border: 1px solid #c8d7e6;
+  border-radius: 999px;
+  background: #fff;
+  color: #33506b;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.batch-chip strong {
+  font-size: 11px;
+}
+
+.batch-chip span {
+  color: #8a98aa;
+  font-size: 10px;
+}
+
+.batch-chip i {
+  display: inline-grid;
+  width: 16px;
+  height: 16px;
+  place-items: center;
+  border-radius: 50%;
+  color: #8a98aa;
+  font-size: 9px;
+}
+
+.batch-chip i:hover {
+  background: #e7edf3;
+  color: #b42318;
+}
+
+.batch-chip--selected {
+  border-color: #1f6fa9;
+  box-shadow: 0 0 0 1px #1f6fa9 inset;
+}
+
+.batch-dock__actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.batch-error {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  padding: 5px 14px;
+  border-bottom: 1px solid #f2c4c1;
+  background: #fdf3f2;
+  color: #b42318;
+  font-size: 11px;
+}
+
+.batch-error span {
+  color: #98665f;
 }
 
 .selection-count {
@@ -554,6 +678,8 @@ main {
   .app-header,
   .toolbar,
   .summary-bar,
+  .batch-dock,
+  .batch-error,
   .workspace__left,
   .workspace__right,
   .graph-panel__header,

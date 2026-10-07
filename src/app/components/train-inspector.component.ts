@@ -39,7 +39,7 @@ import { formatDuration, formatTime } from '../utils/time';
               <i></i>
               <div>
                 <strong>{{ stationMap[stop.stationId]?.name || stop.stationId }}</strong>
-                <small>{{ stop.trackId.split('-').pop() }}道 · {{ stop.kind }}</small>
+                <small>{{ trackName(stop) }} · {{ stopKindLabel(stop.kind) }}</small>
               </div>
             </div>
             <div class="stop-row__times">
@@ -49,24 +49,36 @@ import { formatDuration, formatTime } from '../utils/time';
             </div>
             <p-select
               [options]="stopKinds"
-              [(ngModel)]="stop.kind"
+              [ngModel]="stop.kind"
               optionLabel="label"
               optionValue="value"
               (ngModelChange)="changeKind(stop, $event)"
               size="small"
               [ariaLabel]="'设置 ' + (stationMap[stop.stationId]?.name || '') + ' 作业方式'"
             ></p-select>
-            <p-inputNumber
-              [(ngModel)]="stop.departure"
-              [min]="stop.arrival"
-              [max]="stop.arrival + 60"
-              [showButtons]="true"
-              buttonLayout="horizontal"
-              [step]="1"
-              (ngModelChange)="changeDeparture(stop, $event)"
-              size="small"
-              [ariaLabel]="'调整停站分钟'"
-            ></p-inputNumber>
+            <div class="stop-row__controls">
+              <p-select
+                [options]="trackOptions(stop.stationId)"
+                [ngModel]="stop.trackId"
+                optionLabel="label"
+                optionValue="value"
+                (ngModelChange)="changeTrack(stop, $event)"
+                [placeholder]="'股道'"
+                size="small"
+                [ariaLabel]="'调整 ' + (stationMap[stop.stationId]?.name || '') + ' 股道'"
+              ></p-select>
+              <p-inputNumber
+                [ngModel]="stop.departure"
+                [min]="stop.arrival"
+                [max]="stop.arrival + 60"
+                [showButtons]="true"
+                buttonLayout="horizontal"
+                [step]="1"
+                (ngModelChange)="changeDeparture(stop, $event)"
+                size="small"
+                [ariaLabel]="'调整停站分钟'"
+              ></p-inputNumber>
+            </div>
           </article>
         </div>
       </div>
@@ -84,6 +96,7 @@ import { formatDuration, formatTime } from '../utils/time';
           size="small"
           (onClick)="shift.emit(2)"
         ></p-button>
+        <span class="inspector__hint">改动进入待发布批次，仅预演生效</span>
       </footer>
     </section>
     <ng-template #noTrain>
@@ -177,13 +190,30 @@ import { formatDuration, formatTime } from '../utils/time';
 
       .stop-row {
         display: grid;
-        grid-template-columns: minmax(110px, 1.35fr) 80px minmax(82px, 0.8fr) 108px;
+        grid-template-columns: minmax(104px, 1.25fr) 78px minmax(76px, 0.7fr) minmax(172px, 1.35fr);
         gap: 7px;
         align-items: center;
         padding: 8px;
         border: 1px solid #e1e6ed;
         border-radius: 6px;
         background: #fbfcfd;
+      }
+
+      .stop-row__controls {
+        display: flex;
+        gap: 5px;
+        align-items: center;
+        min-width: 0;
+      }
+
+      .stop-row__controls p-select {
+        min-width: 78px;
+        flex: 1;
+      }
+
+      .stop-row__controls p-inputNumber {
+        width: 96px;
+        flex: 0 0 auto;
       }
 
       .stop-row__station {
@@ -232,9 +262,16 @@ import { formatDuration, formatTime } from '../utils/time';
       .inspector__footer {
         display: flex;
         gap: 8px;
+        align-items: center;
         padding: 10px 12px;
         border-top: 1px solid #e5e9ef;
         background: #f8fafc;
+      }
+
+      .inspector__hint {
+        margin-left: auto;
+        color: #94a1b2;
+        font-size: 10px;
       }
 
       .empty-panel {
@@ -294,15 +331,38 @@ export class TrainInspectorComponent {
     return this.trainShifted;
   }
 
+  stopKindLabel(kind: StopKind): string {
+    if (kind === 'stop') return '停站';
+    if (kind === 'pass') return '通过';
+    if (kind === 'meet') return '会让';
+    return '越行';
+  }
+
+  trackOptions(stationId: string): Array<{ label: string; value: string }> {
+    return (this.stationMap[stationId]?.tracks ?? []).map((track) => ({
+      label: track.name,
+      value: track.id,
+    }));
+  }
+
+  trackName(stop: TrainStop): string {
+    const track = this.stationMap[stop.stationId]?.tracks.find((item) => item.id === stop.trackId);
+    return track ? track.name : `${stop.trackId.split('-').pop() ?? stop.trackId}道`;
+  }
+
   changeKind(stop: TrainStop, kind: StopKind): void {
-    stop.kind = kind;
+    // 只派发动作，进入待发布批次；不直接改写当前对象
     this.stopUpdated.emit({ stationId: stop.stationId, changes: { kind } });
+  }
+
+  changeTrack(stop: TrainStop, trackId: string): void {
+    if (!trackId || trackId === stop.trackId) return;
+    this.stopUpdated.emit({ stationId: stop.stationId, changes: { trackId } });
   }
 
   changeDeparture(stop: TrainStop, departure: number | null): void {
     if (departure == null) return;
     const safeDeparture = Math.max(stop.arrival, Math.min(stop.arrival + 60, departure));
-    stop.departure = safeDeparture;
     this.stopUpdated.emit({ stationId: stop.stationId, changes: { departure: safeDeparture } });
   }
 

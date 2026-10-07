@@ -2,7 +2,7 @@ import { AsyncPipe } from '@angular/common';
 import { Component, inject } from '@angular/core';
 import { RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
 import { Store } from '@ngrx/store';
-import { selectConflictSummary, selectNetwork } from './stores/timetable.selectors';
+import { selectPublishedConflictSummary, selectPublishedNetwork } from './stores/timetable.selectors';
 import { ButtonModule } from 'primeng/button';
 
 @Component({
@@ -35,6 +35,6 @@ import { ButtonModule } from 'primeng/button';
 })
 export class AppComponent {
   private readonly store = inject(Store);
-  readonly network$ = this.store.select(selectNetwork);
-  readonly summary$ = this.store.select(selectConflictSummary);
+  readonly network$ = this.store.select(selectPublishedNetwork);
+  readonly summary$ = this.store.select(selectPublishedConflictSummary);
 }
